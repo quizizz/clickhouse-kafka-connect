@@ -87,7 +87,7 @@ public class KeeperStateProvider implements StateProvider {
     @Override
     public StateRecord getStateRecord(String topic, int partition) {
         String key;
-        if (csc.getConnectStatePrefix() == null || csc.getConnectStatePrefix().isEmpty()) {
+        if (!csc.getConnectStatePrefix().isEmpty()) {
             key = String.format("%s-%d", topic, partition);
         } else {
             key = String.format("%s-%s-%d",csc.getConnectStatePrefix(), topic, partition);
@@ -124,7 +124,7 @@ public class KeeperStateProvider implements StateProvider {
         long maxOffset = stateRecord.getMaxOffset();
         String key = stateRecord.getTopicAndPartitionKey();
 
-        if (!(csc.getConnectStatePrefix() == null || csc.getConnectStatePrefix().isEmpty())) {
+        if (!csc.getConnectStatePrefix().isEmpty()) {
             key = String.format("%s-%s", csc.getConnectStatePrefix(), key );
         }
 
