@@ -26,6 +26,8 @@ public class ClickHouseSinkTask extends SinkTask {
     private ClickHouseSinkConfig clickHouseSinkConfig;
     private ErrorReporter errorReporter;
     private ConnectorStatistics statistics;
+    private static final AtomicInteger NEXT_ID = new AtomicInteger();
+    private int id = NEXT_ID.getAndAdd(1);
 
     @Override
     public String version() {
@@ -47,7 +49,7 @@ public class ClickHouseSinkTask extends SinkTask {
     }
 
     private String getMBeanName() {
-        return String.format("com.clickhouse:type=ClickHouseKafkaConnector,name=ConnectorStatistics,version=%s",
+        return String.format("com.clickhouse:type=ClickHouseKafkaConnector,name=ConnectorStatistics%d,version=%s", id,
                 ClickHouseClientOption.class.getPackage().getImplementationVersion());
     }
 
