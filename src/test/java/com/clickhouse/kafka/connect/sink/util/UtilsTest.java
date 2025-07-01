@@ -2,7 +2,7 @@ package com.clickhouse.kafka.connect.sink.util;
 
 import com.clickhouse.client.ClickHouseException;
 import com.clickhouse.kafka.connect.util.Utils;
-import com.clickhouse.kafka.connect.util.jmx.SinkTaskStatistics;
+import com.clickhouse.kafka.connect.util.jmx.ConnectorStatistics;
 
 import org.apache.kafka.connect.errors.RetriableException;
 import org.junit.jupiter.api.DisplayName;
@@ -45,7 +45,7 @@ public class UtilsTest {
     public void TestClickHouseClientTimeoutCause() {
         assertThrows(RetriableException.class, () -> {
             Exception timeout = new IOException("Write timed out after 30000 ms");
-            Utils.handleException(timeout, false, new ArrayList<>(), new SinkTaskStatistics());
+            Utils.handleException(timeout, false, new ArrayList<>(), new ConnectorStatistics());
         });
     }
 }

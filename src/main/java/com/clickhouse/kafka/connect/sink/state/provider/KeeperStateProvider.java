@@ -94,7 +94,7 @@ public class KeeperStateProvider implements StateProvider {
     @Override
     public StateRecord getStateRecord(String topic, int partition) {
         String key;
-        if (!csc.getConnectStatePrefix().isEmpty()) {
+        if (csc.getConnectStatePrefix().isEmpty()) {
             key = String.format("%s-%d", topic, partition);
         } else {
             key = String.format("%s-%s-%d",csc.getConnectStatePrefix(), topic, partition);
