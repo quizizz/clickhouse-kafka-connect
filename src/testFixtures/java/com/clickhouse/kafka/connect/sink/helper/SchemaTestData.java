@@ -1,5 +1,7 @@
 package com.clickhouse.kafka.connect.sink.helper;
 
+import com.clickhouse.kafka.connect.test.TestProtos;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
@@ -8,7 +10,6 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Time;
 import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.sink.SinkRecord;
-import org.testcontainers.shaded.org.apache.commons.lang3.RandomStringUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -415,6 +416,50 @@ public class SchemaTestData {
         });
         return array;
     }
+
+    public static Collection<SinkRecord> createJSONType(String topic, int partition, int totalRecords) {
+
+        Schema CONTENT_SCHEMA = SchemaBuilder.struct()
+                .field("k1", Schema.STRING_SCHEMA)
+                .field("k2", Schema.STRING_SCHEMA);
+
+        Schema NESTED_SCHEMA = SchemaBuilder.struct()
+                .field("off16", Schema.INT16_SCHEMA)
+                .field("struct_content", CONTENT_SCHEMA)
+                .field("json_as_str", Schema.STRING_SCHEMA)
+                .build();
+
+
+        List<SinkRecord> array = new ArrayList<>();
+        LongStream.range(0, totalRecords).forEachOrdered(n -> {
+
+            Struct content = new Struct(CONTENT_SCHEMA)
+                    .put("k1", "v1" + n)
+                    .put("k2", "v2" + n);
+
+            Struct value_struct = new Struct(NESTED_SCHEMA)
+                    .put("off16", (short)n)
+                    .put("struct_content", content)
+                    .put("json_as_str", "{\"k3\":\"v3\", \"k4\":\"v4\"}")
+                    ;
+
+
+            SinkRecord sr = new SinkRecord(
+                    topic,
+                    partition,
+                    null,
+                    null, NESTED_SCHEMA,
+                    value_struct,
+                    n,
+                    System.currentTimeMillis(),
+                    TimestampType.CREATE_TIME
+            );
+
+            array.add(sr);
+        });
+        return array;
+    }
+
     public static Collection<SinkRecord> createTupleType(String topic, int partition) {
         return createTupleType(topic, partition, DEFAULT_TOTAL_RECORDS);
     }
@@ -1450,5 +1495,53 @@ public class SchemaTestData {
             array.add(sr);
         });
         return array;
+    }
+
+    public static TestProtos.TestMessage createUserMessage() {
+        return TestProtos.TestMessage.newBuilder()
+                .setId(123)
+                .setName("Test User")
+                .setIsActive(true)
+                .setScore(95.5)
+                .addAllTags(Arrays.asList("tag1", "tag2"))
+                .setUserInfo(
+                        TestProtos.UserInfo.newBuilder()
+                                .setEmail("user@example.com")
+                                .setAge(30)
+                                .setUserType(TestProtos.UserInfo.UserType.PREMIUM)
+                                .setAddress(TestProtos.UserAddress.newBuilder()
+                                        .setStreet("123 Main St")
+                                        .setCity("Anytown")
+                                        .setState("CA")
+                                        .setZip("12345")
+                                        .setAlt(TestProtos.UserAddress.newBuilder()
+                                                .setStreet("456 Elm St")
+                                                .setCity("Othertown")
+                                                .setState("NY")
+                                                .setZip("54321")
+                                                .build()
+                                                )
+                                .build()
+                                )
+                )
+                .build();
+    }
+
+    public static TestProtos.TestMessage createProductMessage() {
+        return TestProtos.TestMessage.newBuilder()
+                .setId(456)
+                .setName("Test Product")
+                .setIsActive(true)
+                .setScore(4.5)
+                .addAllTags(Arrays.asList("electronics", "gadgets"))
+                .setProductInfo(
+                        TestProtos.ProductInfo.newBuilder()
+                                .setSku("PROD-123")
+                                .setPrice(99.99)
+                                .setInStock(true)
+                                .addAllCategories(Arrays.asList("Electronics", "Gadgets"))
+                                .build()
+                )
+                .build();
     }
 }

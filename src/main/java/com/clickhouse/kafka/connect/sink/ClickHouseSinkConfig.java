@@ -96,6 +96,7 @@ public class ClickHouseSinkConfig {
     private final boolean bypassFieldCleanup;
     private final String connectStatePrefix;
     private final boolean ignorePartitionsWhenBatching;
+    private final boolean binaryFormatWrtiteJsonAsString;
 
     public enum InsertFormats {
         NONE,
@@ -286,6 +287,10 @@ public class ClickHouseSinkConfig {
         this.connectStatePrefix = props.getOrDefault(CONNECT_STATE_PREFIX, "").trim();
         this.ignorePartitionsWhenBatching = Boolean
                 .parseBoolean(props.getOrDefault(IGNORE_PARTITIONS_WHEN_BATCHING, "false"));
+
+        String jsonAsString = getClickhouseSettings().get("input_format_binary_read_json_as_string");
+        this.binaryFormatWrtiteJsonAsString = jsonAsString != null
+                && (jsonAsString.equalsIgnoreCase("true") || jsonAsString.equals("1"));
 
         LOGGER.debug(
                 "ClickHouseSinkConfig: hostname: {}, port: {}, database: {}, username: {}, sslEnabled: {}, timeout: {}, retry: {}, exactlyOnce: {}",

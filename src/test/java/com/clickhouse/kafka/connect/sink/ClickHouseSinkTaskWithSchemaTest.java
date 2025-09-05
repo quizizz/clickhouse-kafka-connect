@@ -1,32 +1,44 @@
 package com.clickhouse.kafka.connect.sink;
 
+import com.clickhouse.client.api.ClientConfigProperties;
 import com.clickhouse.kafka.connect.sink.db.helper.ClickHouseHelperClient;
 import com.clickhouse.kafka.connect.sink.helper.ClickHouseTestHelpers;
 import com.clickhouse.kafka.connect.sink.helper.SchemaTestData;
-import com.clickhouse.kafka.connect.sink.junit.extension.FromVersionConditionExtension;
-import com.clickhouse.kafka.connect.sink.junit.extension.SinceClickHouseVersion;
+import com.clickhouse.kafka.connect.test.junit.extension.FromVersionConditionExtension;
+import com.clickhouse.kafka.connect.test.junit.extension.SinceClickHouseVersion;
+import com.clickhouse.kafka.connect.test.TestProtos;
 import com.clickhouse.kafka.connect.util.Utils;
+import io.confluent.connect.protobuf.ProtobufConverter;
+import io.confluent.connect.protobuf.ProtobufConverterConfig;
+import io.confluent.connect.protobuf.ProtobufDataConfig;
+import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
+import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
+import io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializer;
+import io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializerConfig;
+import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.shaded.org.apache.commons.lang3.RandomUtils;
 
-import java.awt.desktop.SystemSleepEvent;
+import java.io.Serializable;
 import java.math.BigDecimal;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.clickhouse.kafka.connect.sink.ClickHouseSinkConfig.TABLE_REFRESH_INTERVAL;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @ExtendWith(FromVersionConditionExtension.class)
 public class ClickHouseSinkTaskWithSchemaTest extends ClickHouseBase {
@@ -730,7 +742,7 @@ public class ClickHouseSinkTaskWithSchemaTest extends ClickHouseBase {
     public void changeSchemaWhileRunningWithRefreshEnabled() throws InterruptedException {
         Map<String, String> props = createProps();
         ClickHouseHelperClient chc = createClient(props);
-        props.put(TABLE_REFRESH_INTERVAL, "1");
+        props.put(ClickHouseSinkConfig.TABLE_REFRESH_INTERVAL, "1");
         String topic = createTopicName("change-schema-while-running-table-test-with-refresh-enabled");
         ClickHouseTestHelpers.dropTable(chc, topic);
         ClickHouseTestHelpers.createTable(chc, topic, "CREATE TABLE `%s` (" +
@@ -875,5 +887,217 @@ public class ClickHouseSinkTaskWithSchemaTest extends ClickHouseBase {
         chst.stop();
 
         assertEquals(sr.size(), ClickHouseTestHelpers.countRows(chc, topic));
+    }
+
+    @Test
+    @SinceClickHouseVersion("24.10")
+    public void testWritingJsonAsStringWithRowBinary() {
+        Map<String, String> props = createProps();
+        ClickHouseHelperClient chc = createClient(props);
+        props.put(ClickHouseSinkConfig.CLICKHOUSE_SETTINGS, "input_format_binary_read_json_as_string=1");
+        String topic = createTopicName("schema_json_table_test");
+        ClickHouseTestHelpers.dropTable(chc, topic);
+
+        Map<String, Serializable> clientSettings = new HashMap<>();
+        clientSettings.put(ClientConfigProperties.serverSetting("allow_experimental_json_type"), "1");
+        ClickHouseTestHelpers.createTable(chc, topic, "CREATE TABLE %s ( `off16` Int16, " +
+                " `struct_content` JSON, `json_as_str` JSON ) Engine = MergeTree ORDER BY off16", clientSettings);
+
+        Collection<SinkRecord> sr = SchemaTestData.createJSONType(topic, 1, 10);
+        ClickHouseSinkTask chst = new ClickHouseSinkTask();
+        chst.start(props);
+        chst.put(sr);
+        chst.stop();
+        assertEquals(sr.size(), ClickHouseTestHelpers.countRows(chc, topic));
+    }
+
+    @Test
+    @SinceClickHouseVersion("24.10")
+    public void testWritingProtoMessageWithRowBinary() throws Exception {
+
+        Map<String, String> props = createProps();
+        ClickHouseHelperClient chc = createClient(props);
+        props.put(ClickHouseSinkConfig.CLICKHOUSE_SETTINGS, "input_format_binary_read_json_as_string=1");
+        String topic = createTopicName("protobuf_table_test");
+        ClickHouseTestHelpers.dropTable(chc, topic);
+
+        TestProtos.TestMessage userMsg = SchemaTestData.createUserMessage();
+        TestProtos.TestMessage productMsg = SchemaTestData.createProductMessage();
+
+        MockSchemaRegistryClient schemaRegistry = new MockSchemaRegistryClient();
+        // Register your test schema
+        ProtobufSchema schema = new ProtobufSchema(userMsg.getDescriptorForType());
+        String subject = topic + "-value";
+        schemaRegistry.register(subject, schema);
+
+        ProtobufConverter protobufConverter = new ProtobufConverter(schemaRegistry);
+        Map<String, Object> converterConfig = new HashMap<>();
+        converterConfig.put(ProtobufConverterConfig.AUTO_REGISTER_SCHEMAS, true);
+        converterConfig.put(ProtobufDataConfig.GENERATE_INDEX_FOR_UNIONS_CONFIG, false);
+        converterConfig.put(KafkaProtobufSerializerConfig.SCHEMA_REGISTRY_URL_CONFIG, "mock://test-url");
+
+        protobufConverter.configure(converterConfig, false);
+        KafkaProtobufSerializer protobufSerializer = new KafkaProtobufSerializer(schemaRegistry);
+        byte[] serializedUserMsg=  protobufSerializer.serialize(topic, userMsg);
+        SchemaAndValue userConnectData = protobufConverter.toConnectData(topic, serializedUserMsg);
+        byte[] serializedProdudctMsg=  protobufSerializer.serialize(topic, productMsg);
+        SchemaAndValue productConnectData = protobufConverter.toConnectData(topic, serializedProdudctMsg);
+
+        List<SinkRecord> records = Arrays.asList(
+                new SinkRecord(topic, 0, null, null,
+                        userConnectData.schema(), userConnectData.value(), 0),
+                new SinkRecord(topic, 0, null, null,
+                        productConnectData.schema(), productConnectData.value(), 1)
+        );
+
+        Map<String, Serializable> clientSettings = new HashMap<>();
+        clientSettings.put(ClientConfigProperties.serverSetting("allow_experimental_json_type"), "1");
+
+        ClickHouseTestHelpers.createTable(chc, topic,
+                "CREATE TABLE %s ( `id` Int32, `name` String, `is_active` Boolean, `score` Float64, `tags` Array(String), " +
+                " `content` JSON ) Engine = MergeTree ORDER BY ()", clientSettings);
+
+        ClickHouseSinkTask chst = new ClickHouseSinkTask();
+        chst.start(props);
+        chst.put(records);
+        chst.stop();
+        assertEquals(records.size(), ClickHouseTestHelpers.countRows(chc, topic));
+        
+        // Verify the actual row data matches the proto JSON conversion by comparing JSON strings
+        List<JSONObject> insertedRows = ClickHouseTestHelpers.getAllRowsAsJson(chc, topic);
+        assertEquals(records.size(), insertedRows.size());
+        
+        // Compare database rows directly with protobuf message fields
+        JSONObject firstRow = insertedRows.get(0);
+        JSONObject secondRow = insertedRows.get(1);
+        
+        // Verify first row (user message) top-level fields match protobuf
+        assertEquals(userMsg.getId(), firstRow.getInt("id"));
+        assertEquals(userMsg.getName(), firstRow.getString("name"));
+        assertEquals(userMsg.getIsActive(), firstRow.getBoolean("is_active"));
+        assertEquals(userMsg.getScore(), firstRow.getDouble("score"), 0.01);
+        
+        // Verify tags array matches protobuf
+        JSONArray userTagsArray = firstRow.getJSONArray("tags");
+        assertEquals(userMsg.getTagsCount(), userTagsArray.length());
+        for (int i = 0; i < userMsg.getTagsCount(); i++) {
+            assertEquals(userMsg.getTags(i), userTagsArray.getString(i));
+        }
+        
+        // Verify the content column contains the nested user_info data
+        JSONObject firstRowContent = firstRow.getJSONObject("content");
+        assertTrue(firstRowContent.has("user_info"), "Content should contain user_info");
+        JSONObject userInfo = firstRowContent.getJSONObject("user_info");
+        assertEquals(userMsg.getUserInfo().getEmail(), userInfo.getString("email"));
+        assertEquals(userMsg.getUserInfo().getUserType().name(), userInfo.getString("user_type"));
+        // Handle age type conversion (ClickHouse stores as string, protobuf as int)
+        assertEquals(userMsg.getUserInfo().getAge(), userInfo.getNumber("age").intValue());
+        // Verify address fields match protobuf
+        JSONObject address = userInfo.getJSONObject("address");
+        assertEquals(userMsg.getUserInfo().getAddress().getStreet(), address.getString("street"));
+        assertEquals(userMsg.getUserInfo().getAddress().getCity(), address.getString("city"));
+        assertEquals(userMsg.getUserInfo().getAddress().getState(), address.getString("state"));
+        assertEquals(userMsg.getUserInfo().getAddress().getZip(), address.getString("zip"));
+        // Verify nested address
+        JSONObject altAddress = address.getJSONObject("alt");
+        assertEquals(userMsg.getUserInfo().getAddress().getAlt().getStreet(), altAddress.getString("street"));
+        assertEquals(userMsg.getUserInfo().getAddress().getAlt().getCity(), altAddress.getString("city"));
+        assertEquals(userMsg.getUserInfo().getAddress().getAlt().getState(), altAddress.getString("state"));
+        assertEquals(userMsg.getUserInfo().getAddress().getAlt().getZip(), altAddress.getString("zip"));
+        
+        // Verify second row (product message) top-level fields match protobuf
+        assertEquals(productMsg.getId(), secondRow.getInt("id"));
+        assertEquals(productMsg.getName(), secondRow.getString("name"));
+        assertEquals(productMsg.getIsActive(), secondRow.getBoolean("is_active"));
+        assertEquals(productMsg.getScore(), secondRow.getDouble("score"), 0.01);
+        
+        // Verify product tags array matches protobuf
+        JSONArray productTagsArray = secondRow.getJSONArray("tags");
+        assertEquals(productMsg.getTagsCount(), productTagsArray.length());
+        for (int i = 0; i < productMsg.getTagsCount(); i++) {
+            assertEquals(productMsg.getTags(i), productTagsArray.getString(i));
+        }
+        
+        // Verify the content column contains the nested product_info data
+        JSONObject secondRowContent = secondRow.getJSONObject("content");
+        assertTrue(secondRowContent.has("product_info"), "Content should contain product_info");
+        JSONObject productInfo = secondRowContent.getJSONObject("product_info");
+        assertEquals(productMsg.getProductInfo().getSku(), productInfo.getString("sku"));
+        assertEquals(productMsg.getProductInfo().getPrice(), productInfo.getDouble("price"), 0.01);
+        assertEquals(productMsg.getProductInfo().getInStock(), productInfo.getBoolean("in_stock"));
+        
+        // Verify categories array in product_info matches protobuf
+        JSONArray categoriesArray = productInfo.getJSONArray("categories");
+        assertEquals(productMsg.getProductInfo().getCategoriesCount(), categoriesArray.length());
+        for (int i = 0; i < productMsg.getProductInfo().getCategoriesCount(); i++) {
+            assertEquals(productMsg.getProductInfo().getCategories(i), categoriesArray.getString(i));
+        }
+    }
+
+    public List<Collection<SinkRecord>> partition(Collection<SinkRecord> collection, int size) {
+
+        List<Collection<SinkRecord>> partitions = new ArrayList<>();
+        Iterator<SinkRecord> iterator = collection.iterator();
+
+        while (iterator.hasNext()) {
+            Collection<SinkRecord> partition = new ArrayList<>();
+            for (int i = 0; i < size && iterator.hasNext(); i++) {
+                partition.add(iterator.next());
+            }
+            partitions.add(partition);
+        }
+        return partitions;
+    }
+
+    @ParameterizedTest
+    //@ValueSource(ints = {11, 17 , 37,  61, 113, 131, 150, 157, 167, 229})
+    @CsvSource({
+            "11, 7",
+            "17, 11",
+            "37, 17",
+            "61, 37",
+            "113, 120",
+            "131, 150",
+            "150, 160",
+            "157, 131",
+            "167, 161",
+            "229, 220",
+            "229, 221",
+    })
+    public void exactlyOnceStateMismatchTest(int split, int batch) {
+        // This test is running only cloud
+        if (!isCloud)
+            return;
+        Map<String, String> props = createProps();
+        ClickHouseHelperClient chc = createClient(props);
+
+        String topic = "exactly_once_state_mismatch_test_" + split + "_" + batch + "_" + System.currentTimeMillis();
+        ClickHouseTestHelpers.dropTable(chc, topic);
+        ClickHouseTestHelpers.createTable(chc, topic, "CREATE TABLE %s ( `off16` Int16, `arr` Array(String), `arr_empty` Array(String), " +
+                "`arr_int8` Array(Int8), `arr_int16` Array(Int16), `arr_int32` Array(Int32), `arr_int64` Array(Int64), `arr_float32` Array(Float32), " +
+                "`arr_float64` Array(Float64), `arr_bool` Array(Bool), `arr_str_arr` Array(Array(String)), `arr_arr_str_arr` Array(Array(Array(String))), " +
+                "`arr_map` Array(Map(String, String))  ) Engine = MergeTree ORDER BY off16");
+        // https://github.com/apache/kafka/blob/trunk/connect/api/src/test/java/org/apache/kafka/connect/data/StructTest.java#L95-L98
+        Collection<SinkRecord> sr = SchemaTestData.createArrayType(topic, 1);
+        List<Collection<SinkRecord>> data = partition(sr, split);
+        data = data.subList(0, data.size() - 2);
+        List<Collection<SinkRecord>> data01 = partition(sr, batch);
+        // dropping first batch since connect might think someone restarted the topic and offset is set to zero
+        data01.remove(0);
+        ClickHouseSinkTask chst = new ClickHouseSinkTask();
+        props.put(ClickHouseSinkConfig.TOLERATE_STATE_MISMATCH, "true");
+        props.put(ClickHouseSinkConfig.EXACTLY_ONCE, "true");
+        chst.start(props);
+        for (Collection<SinkRecord> records : data) {
+            chst.put(records);
+        }
+        assertEquals(data.size() * split, ClickHouseTestHelpers.countRows(chc, topic));
+        for (Collection<SinkRecord> records : data01) {
+            chst.put(records);
+        }
+        chst.stop();
+        // after the second insert we have exactly sr.size() records
+        assertEquals(sr.size(), ClickHouseTestHelpers.countRows(chc, topic));assertTrue(ClickHouseTestHelpers.validateRows(chc, topic, sr));
+
     }
 }

@@ -28,6 +28,8 @@ import com.clickhouse.kafka.connect.sink.db.mapping.Type;
 import com.clickhouse.kafka.connect.sink.dlq.ErrorReporter;
 import com.clickhouse.kafka.connect.util.QueryIdentifier;
 import com.clickhouse.kafka.connect.util.Utils;
+import com.google.gson.ExclusionStrategy;
+import com.google.gson.FieldAttributes;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import org.apache.kafka.connect.data.Field;
@@ -62,6 +64,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import static com.clickhouse.kafka.connect.util.DataJson.GSON;
+
 public class ClickHouseWriter implements DBWriter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ClickHouseWriter.class);
@@ -89,7 +93,7 @@ public class ClickHouseWriter implements DBWriter {
     @Override
     public boolean start(ClickHouseSinkConfig csc) {
         LOGGER.trace("Starting ClickHouseWriter");
-        this.csc = csc;
+        setSinkConfig(csc);
         String clientVersion = csc.getClientVersion();
         boolean useClientV2 = clientVersion.equals("V1") ? false : true;
 
@@ -260,6 +264,15 @@ public class ClickHouseWriter implements DBWriter {
 
                                 if (("DECIMAL".equalsIgnoreCase(colTypeName) && objSchema.name().equals("org.apache.kafka.connect.data.Decimal")))
                                     continue;
+
+                                if (type == Type.JSON) {
+                                    if (csc.isBinaryFormatWrtiteJsonAsString() &&
+                                            (dataTypeName.equals("STRUCT") || dataTypeName.equals("STRING"))) {
+                                        // we will convert struct to a string
+                                        //  suppose to have JSON already
+                                        continue;
+                                    }
+                                }
 
                                 validSchema = false;
                                 LOGGER.error(String.format("Table column name [%s] type [%s] is not matching data column type [%s]", col.getName(), colTypeName, dataTypeName));
@@ -520,6 +533,20 @@ public class ClickHouseWriter implements DBWriter {
                     );
                 }
                 break;
+            case JSON:
+                if (csc.isBinaryFormatWrtiteJsonAsString()) {
+                    if (value.getFieldType() == Schema.Type.STRUCT) {
+                        byte[] jsonBytes = GSON.toJson(value).getBytes(StandardCharsets.UTF_8);
+                        BinaryStreamUtils.writeString(stream, jsonBytes);
+                    } else if (value.getFieldType() == Schema.Type.STRING) {
+                        BinaryStreamUtils.writeString(stream, ((String) value.getObject()).getBytes(StandardCharsets.UTF_8));
+                    } else {
+                        throw new RuntimeException("Unsupported field type: " + value.getFieldType() + " for column type [JSON]");
+                    }
+                    break;
+                } else {
+                    throw new RuntimeException("Writing JSON in binary is not supported yet. Use `input_format_binary_read_json_as_string=1` in clickhouse settings to allow writing as string");
+                }
             default:
                 // If you wonder, how NESTED works in JDBC:
                 // https://github.com/ClickHouse/clickhouse-java/blob/6cbbd8fe3f86ac26d12a95e0c2b964f3a3755fc9/clickhouse-data/src/main/java/com/clickhouse/data/format/ClickHouseRowBinaryProcessor.java#L159
@@ -731,6 +758,8 @@ public class ClickHouseWriter implements DBWriter {
 
         Record first = records.get(0);
         String database = first.getDatabase();
+        String topic = first.getSinkRecord().topic();
+        String partition = first.getSinkRecord().kafkaPartition().toString();
 
         if (!csc.isBypassSchemaValidation() && !validateDataSchema(table, first, false))
             throw new RuntimeException("Data schema validation failed.");
@@ -782,7 +811,7 @@ public class ClickHouseWriter implements DBWriter {
             LOGGER.debug("Response Summary - Written Bytes: [{}], Written Rows: [{}] - (QueryId: [{}])", insertResponse.getWrittenBytes(), insertResponse.getWrittenRows(), queryId.getQueryId());
         }
         s3 = System.currentTimeMillis();
-        LOGGER.info("batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", records.size(), pushStreamTime,s2 - s1, s3 - s2, queryId.getQueryId());
+        LOGGER.info("topic: {} partition: {} batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", topic, partition, records.size(), pushStreamTime,s2 - s1, s3 - s2, queryId.getQueryId());
     }
     protected void doInsertRawBinaryV1(List<Record> records, Table table, QueryIdentifier queryId, boolean supportDefaults) throws IOException, ExecutionException, InterruptedException {
         long s1 = System.currentTimeMillis();
@@ -792,6 +821,8 @@ public class ClickHouseWriter implements DBWriter {
 
         Record first = records.get(0);
         String database = first.getDatabase();
+        String topic = first.getSinkRecord().topic();
+        String partition = first.getSinkRecord().kafkaPartition().toString();
 
         if (!csc.isBypassSchemaValidation() && !validateDataSchema(table, first, false))
             throw new RuntimeException("Data schema validation failed.");
@@ -836,7 +867,7 @@ public class ClickHouseWriter implements DBWriter {
         }
 
         s3 = System.currentTimeMillis();
-        LOGGER.info("batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", records.size(), pushStreamTime,s2 - s1, s3 - s2, queryId.getQueryId());
+        LOGGER.info("topic :{} partition: {} batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", topic, partition, records.size(), pushStreamTime,s2 - s1, s3 - s2, queryId.getQueryId());
     }
 
     protected void doInsertJson(List<Record> records, Table table, QueryIdentifier queryId) throws IOException, ExecutionException, InterruptedException {
@@ -860,6 +891,8 @@ public class ClickHouseWriter implements DBWriter {
 
         Record first = records.get(0);
         String database = first.getDatabase();
+        String topic = first.getSinkRecord().topic();
+        String partition = first.getSinkRecord().kafkaPartition().toString();
 
         // We don't validate the schema for JSON inserts.  ClickHouse will ignore unknown fields based on the
         // input_format_skip_unknown_fields setting, and missing fields will use ClickHouse defaults
@@ -915,7 +948,7 @@ public class ClickHouseWriter implements DBWriter {
             }
         }
         s3 = System.currentTimeMillis();
-        LOGGER.info("batchSize: {} serialization ms: {} data ms: {} send ms: {} (QueryId: [{}])", records.size(), dataSerializeTime, s2 - s1, s3 - s2, queryId.getQueryId());
+        LOGGER.info("topic: {} partition: {} batchSize: {} serialization ms: {} data ms: {} send ms: {} (QueryId: [{}])", topic, partition, records.size(), dataSerializeTime, s2 - s1, s3 - s2, queryId.getQueryId());
     }
 
     protected void doInsertJsonV2(List<Record> records, Table table, QueryIdentifier queryId) throws IOException, ExecutionException, InterruptedException {
@@ -932,6 +965,8 @@ public class ClickHouseWriter implements DBWriter {
 
         Record first = records.get(0);
         String database = first.getDatabase();
+        String topic = first.getSinkRecord().topic();
+        String partition = first.getSinkRecord().kafkaPartition().toString();
 
         // We don't validate the schema for JSON inserts.  ClickHouse will ignore unknown fields based on the
         // input_format_skip_unknown_fields setting, and missing fields will use ClickHouse defaults
@@ -988,7 +1023,7 @@ public class ClickHouseWriter implements DBWriter {
             LOGGER.debug("Response Summary - Written Bytes: [{}], Written Rows: [{}] - (QueryId: [{}])", insertResponse.getWrittenBytes(), insertResponse.getWrittenRows(), queryId.getQueryId());
         }
         s3 = System.currentTimeMillis();
-        LOGGER.info("batchSize: {} serialization ms: {} data ms: {} send ms: {} (QueryId: [{}])", records.size(), dataSerializeTime, s2 - s1, s3 - s2, queryId.getQueryId());
+        LOGGER.info("topic: {} partition: {} batchSize: {} serialization ms: {} data ms: {} send ms: {} (QueryId: [{}])", topic, partition, records.size(), dataSerializeTime, s2 - s1, s3 - s2, queryId.getQueryId());
     }
 
     protected Map<String, Object> cleanupExtraFields(Map<String, Object> m, Table t) {
@@ -1021,6 +1056,8 @@ public class ClickHouseWriter implements DBWriter {
 
         Record first = records.get(0);
         String database = first.getDatabase();
+        String topic = first.getSinkRecord().topic();
+        String partition = first.getSinkRecord().kafkaPartition().toString();
 
         // We don't validate the schema for JSON inserts.  ClickHouse will ignore unknown fields based on the
         // input_format_skip_unknown_fields setting, and missing fields will use ClickHouse defaults
@@ -1077,7 +1114,7 @@ public class ClickHouseWriter implements DBWriter {
             }
         }
         s3 = System.currentTimeMillis();
-        LOGGER.info("batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", records.size(), pushStreamTime, s2 - s1, s3 - s2, queryId.getQueryId());
+        LOGGER.info("topic: {} partition: {} batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", topic, partition, records.size(), pushStreamTime, s2 - s1, s3 - s2, queryId.getQueryId());
     }
     protected void doInsertStringV2(List<Record> records, Table table, QueryIdentifier queryId) throws IOException, ExecutionException, InterruptedException {
         byte[] endingLine = new byte[]{'\n'};
@@ -1088,6 +1125,8 @@ public class ClickHouseWriter implements DBWriter {
 
         Record first = records.get(0);
         String database = first.getDatabase();
+        String topic = first.getSinkRecord().topic();
+        String partition = first.getSinkRecord().kafkaPartition().toString();
 
         Client client = chc.getClient();
 
@@ -1147,7 +1186,7 @@ public class ClickHouseWriter implements DBWriter {
             LOGGER.debug("Response Summary - Written Bytes: [{}], Written Rows: [{}] - (QueryId: [{}])", insertResponse.getWrittenBytes(), insertResponse.getWrittenRows(), queryId.getQueryId());
         }
         s3 = System.currentTimeMillis();
-        LOGGER.info("batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", records.size(), pushStreamTime, s2 - s1, s3 - s2, queryId.getQueryId());
+        LOGGER.info("topic: {} partition: {} batchSize: {} push stream ms: {} data ms: {} send ms: {} (QueryId: [{}])", topic, partition, records.size(), pushStreamTime, s2 - s1, s3 - s2, queryId.getQueryId());
     }
 
 
@@ -1216,5 +1255,21 @@ public class ClickHouseWriter implements DBWriter {
     @Override
     public long recordsInserted() {
         return 0;
+    }
+
+    private static class SchemaFieldExclusionStrategy implements ExclusionStrategy {
+
+        @Override
+        public boolean shouldSkipField(FieldAttributes f) {
+            if (f.getDeclaringClass() == Data.class && f.getName().equals("schema"))  {
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        public boolean shouldSkipClass(Class<?> clazz) {
+            return false;
+        }
     }
 }
